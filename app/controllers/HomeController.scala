@@ -31,10 +31,10 @@ class HomeController @Inject()(latLongResolver: LatLongResolver) extends Control
       )
       latLongResolver.getDiscreteSteps(origin, destination)
     } match {
-      case Success(value) => value.map { x =>
-        Ok(Json.toJson(x))
+      case Success(value) => value.map { stepResolverResponse =>
+        Ok(Json.toJson(stepResolverResponse))
       }
-      case Failure(exception) =>  Future.successful(BadRequest(s"$exception"))
+      case Failure(exception) =>  Future.successful(InternalServerError(s"$exception"))
     }
 
   }

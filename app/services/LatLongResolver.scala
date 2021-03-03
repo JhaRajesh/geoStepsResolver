@@ -1,22 +1,29 @@
 package services
 
-import com.google.inject.Inject
+import com.google.inject.{ImplementedBy, Inject, Singleton}
 import play.api.Logger
 import play.api.libs.json.{JsError, JsSuccess, Json}
 import play.api.libs.ws.WSClient
+import services.LatLongResolver.{Coordinates, StepResolverResponse}
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 
-class LatLongResolver @Inject()(wsClient: WSClient) {
+@ImplementedBy(classOf[LatLongResolverImpl])
+trait LatLongResolver {
+  def getDiscreteSteps(origin: Coordinates, destination: Coordinates): Future[StepResolverResponse]
+}
+
+@Singleton
+class LatLongResolverImpl @Inject()(wsClient: WSClient) extends LatLongResolver {
   import LatLongResolver._
 
 
-  def getDiscreteSteps(origin: Coordinates, destination: Coordinates): Future[List[Coordinates]] = {
+  def getDiscreteSteps(origin: Coordinates, destination: Coordinates): Future[StepResolverResponse] = {
     for {
       routesResponse <- getDirections(origin, destination)
       steps <- disintegrateRouteResponse(routesResponse, origin)
-    } yield steps
+    } yield StepResolverResponse(steps)
   }
 
   /*===========================Private Methods===============================*/
@@ -97,6 +104,7 @@ class LatLongResolver @Inject()(wsClient: WSClient) {
     Future.successful {
       response.routes.flatMap { route =>
         route.legs.foldLeft(List.empty[Coordinates]) { (currentRouteSteps, leg) =>
+          var prevRemainingDistance: Double = 0
           val legSteps = leg.steps.foldLeft(List.empty[Coordinates]){ (currentLegSteps, step) =>
             val decodedPolyLineCoordinates = decodePolylinePoints(step.polyline.points)
             /*If the step is the not starting step of a leg, we don't add the starting point since that would already be
@@ -106,7 +114,7 @@ class LatLongResolver @Inject()(wsClient: WSClient) {
               else List.empty[Coordinates]
             }
             var prevExploredCoordinates = step.start_location
-            var prevRemainingDistance: Double  = 0
+            /*var prevRemainingDistance: Double  = 0*/
             for(index <- 1 until decodedPolyLineCoordinates.length by 1){
               val distance = getDistanceFromLatLonInMeters(prevExploredCoordinates, decodedPolyLineCoordinates(index))
               if(distance + prevRemainingDistance > 50){
@@ -236,6 +244,11 @@ object LatLongResolver {
   case class RouteResponse(routes: List[Routes])
   object RouteResponse {
     implicit val formats = Json.format[RouteResponse]
+  }
+
+  case class StepResolverResponse(steps: List[Coordinates])
+  object StepResolverResponse {
+    implicit val formats = Json.format[StepResolverResponse]
   }
 
 }
