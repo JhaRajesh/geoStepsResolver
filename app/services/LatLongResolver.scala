@@ -2,21 +2,31 @@ package services
 
 import com.google.inject.Inject
 import play.api.Logger
-import play.api.libs.json.{JsError, JsSuccess, JsValue, Json}
+import play.api.libs.json.{JsError, JsSuccess, Json}
 import play.api.libs.ws.WSClient
-import services.LatLongResolver.Coordinates
 
-import scala.concurrent.Future
 import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.Future
 
 class LatLongResolver @Inject()(wsClient: WSClient) {
   import LatLongResolver._
+
+
+  def getDiscreteSteps(origin: Coordinates, destination: Coordinates): Future[List[Coordinates]] = {
+    for {
+      routesResponse <- getDirections(origin, destination)
+      steps <- disintegrateRouteResponse(routesResponse, origin)
+    } yield steps
+  }
+
+  /*===========================Private Methods===============================*/
+
   private def getDirections(origin: Coordinates, destination: Coordinates): Future[RouteResponse] = {
 
     val url = "https://maps.googleapis.com/maps/api/directions/json?" +
       s"origin=${origin.lat},${origin.lng}" +
       s"&destination=${destination.lat},${destination.lng}" +
-      "&key=AIzaSyAb8ohmBXqtK4y2_a5CFnFnfLGiOsuwjIo&unitSystem=METRIC&mode=walking"
+      "&key=AIzaSyAb8ohmBXqtK4y2_a5CFnFnfLGiOsuwjIo&unitSystem=METRIC"
     wsClient.url(url).get().map {
       case wsResponse if wsResponse.status == 200 =>
         Json.parse(wsResponse.body).validate[RouteResponse](RouteResponse.formats) match {
@@ -48,8 +58,7 @@ class LatLongResolver @Inject()(wsClient: WSClient) {
   private def createCoordinate(coordinates: Coordinates, bearing: Double, distance: Double) = {
     //lat2 = asin(sin la1 * cos Ad  + cos la1 * sin Ad * cos θ)
     //lo2 = lo1 + atan2(sin θ * sin Ad * cos la1 , cos Ad – sin la1 * sin la2)
-    val radius = 6378.14
-    val aD = distance / (radius*1000)
+    val aD = distance / (earthRadiusInKm*1000)
     val theta = bearing.toRadians
     val la1 = coordinates.lat.toRadians
     val lo1 = coordinates.lng.toRadians
@@ -63,37 +72,129 @@ class LatLongResolver @Inject()(wsClient: WSClient) {
     Coordinates(la2.toDegrees, lo2.toDegrees)
   }
 
-  private def disintegrateRouteResponse(response: RouteResponse): Future[List[Coordinates]] = {
+
+  /*Calculates distance between two coordinates.*/
+  private def getDistanceFromLatLonInMeters(coordinates1: Coordinates, coordinates2: Coordinates): Double = {
+    val dLat = (coordinates2.lat - coordinates1.lat).toRadians
+    val dLon = (coordinates2.lng - coordinates1.lng).toRadians
+    val a =
+      Math.sin(dLat/2) * Math.sin(dLat/2) +
+        Math.cos(coordinates1.lat.toRadians) * Math.cos(coordinates2.lat.toRadians) * Math.sin(dLon/2) * Math.sin(dLon/2)
+
+    val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
+    earthRadiusInKm * c * 1000
+  }
+
+  private def disintegrateRouteResponse(response: RouteResponse, origin: Coordinates): Future[List[Coordinates]] = {
 
     Future.successful {
       response.routes.flatMap { route =>
-        route.legs.flatMap { leg =>
-          leg.steps.flatMap { step =>
-            val bearing = getBearing(step.start_location, step.end_location)
-            var res = List(step.start_location)
-            for (x <- 50L to step.distance.value by 50L) {
-              val createCoordinates = createCoordinate(step.start_location, bearing, x)
-              res = res :+ createCoordinates
+        route.legs.foldLeft(List.empty[Coordinates]) { (currentRouteSteps, leg) =>
+          val legSteps = leg.steps.foldLeft(List.empty[Coordinates]){ (currentLegSteps, step) =>
+            val decodedPolyLineCoordinates = decodePolylinePoints(step.polyline.points)
+            var res = {
+              if(currentLegSteps.isEmpty) List(step.start_location)
+              else List.empty[Coordinates]
             }
-            res
+            var prevExploredCoordinates = step.start_location
+            var prevRemainingDistance: Double  = 0
+            for(index <- 1 until decodedPolyLineCoordinates.length by 1){
+              val distance = getDistanceFromLatLonInMeters(prevExploredCoordinates, decodedPolyLineCoordinates(index))
+              if(distance + prevRemainingDistance > 50){
+                val adjustedDistance = 50 - prevRemainingDistance
+                val bearing = getBearing(prevExploredCoordinates, decodedPolyLineCoordinates(index))
+                var currRemainingDistance = distance + prevRemainingDistance - 50
+                val newCoordinates = createCoordinate(prevExploredCoordinates, bearing, adjustedDistance)
+                res = res :+ newCoordinates
+                prevExploredCoordinates = newCoordinates
+                while(currRemainingDistance >= 50){
+                  val newCoordinates = createCoordinate(prevExploredCoordinates, bearing, 50)
+                  res = res :+ newCoordinates
+                  prevExploredCoordinates = newCoordinates
+                  currRemainingDistance = currRemainingDistance - 50
+                }
+
+                prevExploredCoordinates = decodedPolyLineCoordinates(index)
+                prevRemainingDistance = currRemainingDistance
+              }
+              else {
+                prevRemainingDistance += distance
+                prevExploredCoordinates = decodedPolyLineCoordinates(index)
+              }
+            }
+            currentLegSteps ++ res
           }
+          currentRouteSteps ++ legSteps
         }
       }
     }
 
   }
 
-  def getSteps(origin: Coordinates, destination: Coordinates) = {
-    for {
-      routesResponse <- getDirections(origin, destination)
-      steps <- disintegrateRouteResponse(routesResponse)
-    } yield {
-      steps :+ destination
+
+  /**
+    * This method breaks the polyline encoded string to list of coordinates.
+    * Please refer https://developers.google.com/maps/documentation/utilities/polylinealgorithm for details.
+    * */
+  private def decodePolylinePoints(encoded: String): List[Coordinates] = {
+    var poly = List.empty[Coordinates]
+    var index: Int = 0
+    val len = encoded.length()
+    var lat: Double = 0
+    var lng: Double = 0
+
+    while (index < len) {
+      var b: Int = 0
+      var shift = 0
+      var result = 0
+      do {
+        b = encoded.charAt(index) - 63
+        index = index + 1
+        result |= (b & 0x1f) << shift
+        shift += 5
+      } while (b >= 0x20)
+      var dlat: Double = {
+        if((result & 1) != 0){
+          ~(result >> 1)
+        } else {
+          result >> 1
+        }
+      }
+      lat += dlat
+
+      shift = 0
+      result = 0
+      do {
+        b = encoded.charAt(index) - 63
+        index=index+1
+        result |= (b & 0x1f) << shift
+        shift += 5
+      } while (b >= 0x20)
+
+      var dlng: Double = {
+        if((result & 1) != 0){
+          ~(result >> 1)
+        } else {
+          result >> 1
+        }
+      }
+      lng += dlng
+
+      val p: Coordinates = Coordinates(
+        lat / 1E5,
+        lng / 1E5
+      )
+      poly = poly :+ p
+
     }
+    poly
   }
 }
 
 object LatLongResolver {
+
+  final val earthRadiusInKm = 6378.14
+
   case class Distance(value: Long)
   object Distance {
     implicit val formats = Json.format[Distance]
@@ -103,7 +204,13 @@ object LatLongResolver {
   object Coordinates {
     implicit val formats = Json.format[Coordinates]
   }
-  case class Step(distance: Distance, start_location: Coordinates, end_location: Coordinates)
+
+  case class PolyLine(points: String)
+
+  object PolyLine {
+    implicit val formats = Json.format[PolyLine]
+  }
+  case class Step(distance: Distance, start_location: Coordinates, end_location: Coordinates, polyline: PolyLine)
   object Step {
     implicit val formats = Json.format[Step]
   }

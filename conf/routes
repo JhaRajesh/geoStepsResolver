@@ -4,7 +4,7 @@
 # ~~~~
 
 # An example controller showing a sample home page
-GET     /                           controllers.HomeController.index
+#GET     /                           controllers.HomeController.index
 
 GET     /api/v1/directions/getSteps     @controllers.HomeController.getDiscreteSteps(latO: String, lngO: String, latD: String, lngD: String)
 

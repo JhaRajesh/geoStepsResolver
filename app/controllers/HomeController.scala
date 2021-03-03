@@ -29,7 +29,7 @@ class HomeController @Inject()(latLongResolver: LatLongResolver) extends Control
         latD.toDouble,
         lngD.toDouble
       )
-      latLongResolver.getSteps(origin, destination)
+      latLongResolver.getDiscreteSteps(origin, destination)
     } match {
       case Success(value) => value.map { x =>
         Ok(Json.toJson(x))
