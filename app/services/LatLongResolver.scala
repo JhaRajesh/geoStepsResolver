@@ -85,6 +85,13 @@ class LatLongResolver @Inject()(wsClient: WSClient) {
     earthRadiusInKm * c * 1000
   }
 
+  /**
+    * Steps followed while disintegrating step -
+    * For every leg in a route, we have multiple steps. For every step, we get a polyline encoded coordinates from point A to B.
+    * We decode the polyline points, and then for every point, we calculate the distance between them. If that distance and the remaining
+    * distance is lesser than 50m, we don't have to include this point, else we have to add a point at exact 50m which will be somewhere in between,
+    * So, we keep adding points in between until the remaining distance is less than 50 and then we move to another encoded point.
+    */
   private def disintegrateRouteResponse(response: RouteResponse, origin: Coordinates): Future[List[Coordinates]] = {
 
     Future.successful {
@@ -92,6 +99,8 @@ class LatLongResolver @Inject()(wsClient: WSClient) {
         route.legs.foldLeft(List.empty[Coordinates]) { (currentRouteSteps, leg) =>
           val legSteps = leg.steps.foldLeft(List.empty[Coordinates]){ (currentLegSteps, step) =>
             val decodedPolyLineCoordinates = decodePolylinePoints(step.polyline.points)
+            /*If the step is the not starting step of a leg, we don't add the starting point since that would already be
+            added in last step(since last step end coordinates is origin coordinate for next step).*/
             var res = {
               if(currentLegSteps.isEmpty) List(step.start_location)
               else List.empty[Coordinates]
